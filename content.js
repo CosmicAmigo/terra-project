@@ -1,18 +1,36 @@
-if (!window.hasScreenshotListener) {
+if (window.hasScreenshotListener) {
+} else {
   window.hasScreenshotListener = true;
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message.action === "SHOW_THUMBNAIL") {
-      initScreenshotFlow(message.dataUrl, message.defaultFilename, message.sessionId);
+      initScreenshotFlow(message.dataUrl, message.domain);
     }
   });
 }
 
-function initScreenshotFlow(originalDataUrl, defaultFilename, sessionId) {
+function initScreenshotFlow(originalDataUrl, domain) {
   const existing = document.getElementById("ss-thumb-container");
   if (existing) existing.remove();
 
+  let hasDownloadedOriginal = false;
   let isEditing = false;
+
+  function downloadFile(dataUrl, suffix = "") {
+    chrome.runtime.sendMessage({
+      action: "DOWNLOAD_IMAGE",
+      dataUrl: dataUrl,
+      domain: domain,
+      suffix: suffix
+    });
+  }
+
+  const autoDownloadTimer = setTimeout(() => {
+    if (!isEditing && !hasDownloadedOriginal) {
+      hasDownloadedOriginal = true;
+      downloadFile(originalDataUrl);
+    }
+  }, 3000);
 
   const thumbContainer = document.createElement("div");
   thumbContainer.id = "ss-thumb-container";
@@ -38,8 +56,8 @@ function initScreenshotFlow(originalDataUrl, defaultFilename, sessionId) {
   thumbContainer.appendChild(img);
   document.body.appendChild(thumbContainer);
 
-  setTimeout(() => {
-    if (!isEditing && thumbContainer) {
+  const removeThumbTimer = setTimeout(() => {
+    if (!isEditing) {
       thumbContainer.style.opacity = "0";
       setTimeout(() => thumbContainer.remove(), 300);
     }
@@ -47,40 +65,23 @@ function initScreenshotFlow(originalDataUrl, defaultFilename, sessionId) {
 
   thumbContainer.addEventListener("click", () => {
     isEditing = true;
+    clearTimeout(autoDownloadTimer);
+    clearTimeout(removeThumbTimer);
     thumbContainer.remove();
 
-    chrome.runtime.sendMessage({ action: "CANCEL_AUTO_DOWNLOAD", sessionId });
-
-    openAdvancedEditor(originalDataUrl, defaultFilename, (editedDataUrl, chosenFilename, saveMode) => {
+    openAdvancedEditor(originalDataUrl, (editedDataUrl, saveMode) => {
       if (saveMode === "SAVE_BOTH") {
-        chrome.runtime.sendMessage({
-          action: "MANUAL_DOWNLOAD",
-          sessionId,
-          dataUrl: originalDataUrl,
-          filename: chosenFilename,
-          suffix: "original"
-        });
-        setTimeout(() => {
-          chrome.runtime.sendMessage({
-            action: "MANUAL_DOWNLOAD",
-            sessionId,
-            dataUrl: editedDataUrl,
-            filename: chosenFilename,
-            suffix: "edited"
-          });
-        }, 300);
+        downloadFile(originalDataUrl, "original");
+        setTimeout(() => downloadFile(editedDataUrl, "edited"), 300);
       } else {
-        chrome.runtime.sendMessage({
-          action: "MANUAL_DOWNLOAD",
-          sessionId,
-          dataUrl: editedDataUrl,
-          filename: chosenFilename
-        });
+        if (!hasDownloadedOriginal) {
+          downloadFile(editedDataUrl);
+        }
       }
     });
   });
 
-  function openAdvancedEditor(imageSrc, initialFilename, onSaveCallback) {
+  function openAdvancedEditor(imageSrc, onSaveCallback) {
     const modal = document.createElement("div");
     Object.assign(modal.style, {
       position: "fixed",
@@ -94,12 +95,13 @@ function initScreenshotFlow(originalDataUrl, defaultFilename, sessionId) {
       fontFamily: "system-ui, sans-serif"
     });
 
-    let currentTool = "draw"; 
+    let currentTool = "draw";
     let strokeColor = "#ff0055";
+
     const historyStack = [];
 
     const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const ctx = canvas.getContext("2d");
     
     const mainImg = new Image();
     mainImg.src = imageSrc;
@@ -108,7 +110,7 @@ function initScreenshotFlow(originalDataUrl, defaultFilename, sessionId) {
       canvas.width = mainImg.width;
       canvas.height = mainImg.height;
       canvas.style.maxWidth = "80vw";
-      canvas.style.maxHeight = "65vh";
+      canvas.style.maxHeight = "70vh";
       canvas.style.border = "1px solid #444";
       ctx.drawImage(mainImg, 0, 0);
       saveState();
@@ -129,7 +131,6 @@ function initScreenshotFlow(originalDataUrl, defaultFilename, sessionId) {
     }
 
     const handleKeyDown = (e) => {
-      if (document.activeElement === filenameInput) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         undo();
@@ -137,7 +138,6 @@ function initScreenshotFlow(originalDataUrl, defaultFilename, sessionId) {
     };
     window.addEventListener("keydown", handleKeyDown);
 
-    // Toolbar
     const toolbar = document.createElement("div");
     Object.assign(toolbar.style, {
       display: "flex",
@@ -199,7 +199,7 @@ function initScreenshotFlow(originalDataUrl, defaultFilename, sessionId) {
 
     const rotateBtn = createToolBtn(null, "Rotate", () => {
       const tempCanvas = document.createElement("canvas");
-      const tempCtx = tempCanvas.getContext("2d", { willReadFrequently: true });
+      const tempCtx = tempCanvas.getContext("2d");
       
       tempCanvas.width = canvas.height;
       tempCanvas.height = canvas.width;
@@ -220,34 +220,8 @@ function initScreenshotFlow(originalDataUrl, defaultFilename, sessionId) {
     toolbar.append(drawBtn, rubberBtn, rectBtn, circleBtn, cropBtn, rotateBtn, undoBtn);
     updateToolSelection();
 
-    // Actionbar & Filename Input
     const actionbar = document.createElement("div");
-    Object.assign(actionbar.style, {
-      display: "flex",
-      gap: "10px",
-      marginTop: "12px",
-      alignItems: "center"
-    });
-
-    const nameLabel = document.createElement("span");
-    nameLabel.innerText = "File Name:";
-    nameLabel.style.color = "#ccc";
-    nameLabel.style.fontSize = "13px";
-
-    const filenameInput = document.createElement("input");
-    filenameInput.type = "text";
-    filenameInput.value = initialFilename;
-    Object.assign(filenameInput.style, {
-      padding: "6px 10px",
-      background: "#1e1e1e",
-      color: "#fff",
-      border: "1px solid #555",
-      borderRadius: "4px",
-      fontSize: "13px",
-      width: "280px"
-    });
-
-    filenameInput.addEventListener("click", (e) => e.stopPropagation());
+    Object.assign(actionbar.style, { display: "flex", gap: "10px", marginTop: "12px" });
 
     let isClosed = false;
     function finalize(saveMode = "SINGLE") {
@@ -255,9 +229,8 @@ function initScreenshotFlow(originalDataUrl, defaultFilename, sessionId) {
       isClosed = true;
       window.removeEventListener("keydown", handleKeyDown);
       const editedResult = canvas.toDataURL("image/png");
-      const chosenName = filenameInput.value || initialFilename;
       modal.remove();
-      onSaveCallback(editedResult, chosenName, saveMode);
+      onSaveCallback(editedResult, saveMode);
     }
 
     const saveCopyBtn = createToolBtn(null, "Save Copy (Both)", () => finalize("SAVE_BOTH"));
@@ -268,9 +241,8 @@ function initScreenshotFlow(originalDataUrl, defaultFilename, sessionId) {
     doneBtn.style.background = "#2563eb";
     doneBtn.style.borderColor = "#3b82f6";
 
-    actionbar.append(nameLabel, filenameInput, saveCopyBtn, doneBtn);
+    actionbar.append(saveCopyBtn, doneBtn);
 
-    // Canvas drawing logic
     let isDrawing = false;
     let startX = 0, startY = 0;
     let snapshot = null;
